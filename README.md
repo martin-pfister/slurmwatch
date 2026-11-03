@@ -74,6 +74,23 @@ must be on `PATH`; without them only explicit paths work.
 behind resolving the path from Slurm, the three-valued job state, the polling
 backoff, and the known limitations — as a basis for reimplementation.
 
+## Tests
+
+Run locally with Python's standard library; Slurm is not required:
+
+```sh
+python3 -B -m unittest discover -s tests -v
+```
+
+The tests mock Slurm commands, use automatically cleaned-up temporary files,
+and simulate time rather than sleeping. They cover job-state queries,
+output-path resolution, binary reading and truncation, file discovery, and
+completion/drain timing.
+
+Two tests are marked as expected failures to track known bugs: array paths
+using Slurm's separate array fields, and files becoming visible just after
+completion. Once fixed, remove those markers so the tests become regressions.
+
 ## Licence
 
 MIT. See [LICENSE](LICENSE).
