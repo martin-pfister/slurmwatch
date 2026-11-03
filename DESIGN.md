@@ -48,6 +48,8 @@ Escapes that can be resolved up front: `%j` (individual numeric job id), `%x`
 (job name), `%u` (user), `%a` (array task), `%A` (array job id). Array metadata
 comes from the separate `ArrayJobId` and `ArrayTaskId` fields, not from splitting
 `JobId`. Slurm's default array filename is `slurm-%A_%a.out`.
+Numeric filename tokens accept zero-padding widths (such as `%4a`), capped at
+ten digits as in Slurm.
 
 Escapes that cannot: `%N` (node), `%s` (step), `%J` (id *and* step), `%t` (task
 rank, not array index). If the
@@ -176,6 +178,8 @@ attribute caching, `st_size` can lag by seconds. The quiet timer absorbs this.
 If the file has not appeared when completion is detected, allow 10 seconds for
 it to become visible before reporting that the job wrote no file. A file found
 during this grace period gets a fresh quiet timer, even if it is initially empty.
+The state obtained during path resolution is retained: a job already known to
+be complete enters the drain immediately without another scheduler query.
 
 ## Output and exit codes
 
@@ -210,8 +214,9 @@ Verify a 3.6 target by parsing with `ast.parse(src, feature_version=(3, 6))`
 
 - The output file is on a filesystem visible from where the watcher runs.
 - `scontrol`, `squeue`, `sacct` are on `PATH`; without them only explicit paths work.
-- `WorkDir` exists and is readable — otherwise a relative `StdOut` cannot be
-  resolved, and resolving it against `$PWD` silently watches the wrong file.
+- A supplied `WorkDir` is used for relative `StdOut` even if it is inaccessible
+  locally; substituting `$PWD` would silently watch the wrong file. `$PWD` is
+  used only when Slurm provides no working directory.
 - One cluster. No `-M`/federation handling.
 - Accounting retention covers the job, or `./slurm-<id>.out` is used instead.
 

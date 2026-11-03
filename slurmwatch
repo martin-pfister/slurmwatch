@@ -174,8 +174,8 @@ def expand_escapes(pattern, fields):
 
     None if the pattern needs something we cannot know before the job runs:
     node name (%N), step (%s), task rank (%t), or an ambiguous array index
-    (%a on an array record representing multiple tasks). Better to fall back than to wait for
-    a file that will never be created.
+    (%a on an array record representing multiple tasks). Better to fall back
+    than to wait for a file that will never be created.
     """
     job_id = fields.get("JobId", "")
     array_job = fields.get("ArrayJobId", "")
@@ -192,8 +192,17 @@ def expand_escapes(pattern, fields):
         table["a"] = array_task
     elif not array_job:
         table["a"] = "4294967294"  # Slurm's NO_VAL for non-array jobs
+
+    def replace(match):
+        width, token = match.groups()
+        value = table[token]
+        if width and token in ("j", "A", "a"):
+            # Slurm caps numeric filename padding at ten digits.
+            value = value.zfill(min(int(width), 10))
+        return value
+
     try:
-        return re.sub(r"%(.)", lambda m: table[m.group(1)], pattern)
+        return re.sub(r"%([0-9]*)(.)", replace, pattern)
     except KeyError:
         return None
 
@@ -201,7 +210,9 @@ def expand_escapes(pattern, fields):
 def output_path(fields):
     """Where this job writes stdout, from its scontrol fields."""
     pattern = fields.get("StdOut")
-    if not pattern or pattern == "NONE":
+    if pattern in ("", "NONE"):
+        return os.devnull
+    if pattern is None:
         return None
 
     path = expand_escapes(pattern, fields)
@@ -210,7 +221,7 @@ def output_path(fields):
 
     if not os.path.isabs(path):
         workdir = fields.get("WorkDir", "")
-        base = workdir if workdir and os.path.isdir(workdir) else os.getcwd()
+        base = workdir or os.getcwd()
         path = os.path.join(base, path)
     return os.path.normpath(path)
 
@@ -219,15 +230,15 @@ def output_path(fields):
 # locating and reading the file
 
 
-def locate(candidates):
+def locate(candidates, allow_glob=True):
     """First existing regular file among the candidates."""
     for path in candidates:
-        if any(ch in path for ch in "*?["):
+        if os.path.isfile(path):
+            return path
+        if allow_glob and any(ch in path for ch in "*?["):
             matches = sorted(m for m in glob.glob(path) if os.path.isfile(m))
             if matches:
                 return matches[0]
-        elif os.path.isfile(path):
-            return path
     return None
 
 
@@ -257,23 +268,24 @@ def pump(path, pos):
 def resolve(target):
     """Turn the argument into candidate paths, or fail.
 
-    Returns (candidates, exit_code). A job id must be known to Slurm; a path
-    must at least be plausible (existing directory).
+    Returns (candidates, exit_code, initial_state). A job id must be known to
+    Slurm; a path must at least be plausible (existing directory).
 
     Costs one `scontrol` in the normal case. `sacct` is only consulted when
     scontrol does not know the job, to tell "finished earlier" from "no such
     job".
     """
+    state = ""
     if not is_job_id(target):
         path = os.path.expanduser(target)
         parent = os.path.dirname(path) or "."
         if not os.path.isdir(parent):
             log("no such directory: %s" % parent)
-            return None, 2
+            return None, 2, state
         if os.path.isdir(path):
             log("%s is a directory, not an output file" % path)
-            return None, 2
-        return [path], 0
+            return None, 2, state
+        return [path], 0, state
 
     job_id = target
     fields = scontrol_fields(job_id)
@@ -287,7 +299,7 @@ def resolve(target):
                 "  Pass the output file directly instead: "
                 "slurmwatch slurm-%s.out" % (job_id, job_id)
             )
-            return None, 2
+            return None, 2, state
         fallback = "slurm-%s.out" % job_id
         if not state and not os.path.lexists(fallback):
             log(
@@ -296,10 +308,10 @@ def resolve(target):
                 "  Check the id, or pass the output file explicitly:\n"
                 "  slurmwatch path/to/%s" % (job_id, fallback, fallback)
             )
-            return None, 1
+            return None, 1, state
         log("job %s (%s) writes to %s"
             % (job_id, state or "unknown state", fallback))
-        return [fallback], 0
+        return [fallback], 0, state
 
     state = state_from(fields)
     if not state:
@@ -308,8 +320,9 @@ def resolve(target):
 
     path = output_path(fields)
     if path == os.devnull:
-        log("job %s writes no output file (StdOut=/dev/null)" % job_id)
-        return None, 1
+        log("job %s writes no output file (StdOut=%s)"
+            % (job_id, fields.get("StdOut", "")))
+        return None, 1, state
 
     if path is None:
         # scontrol could not name the file. Accept the default name, but only
@@ -322,11 +335,11 @@ def resolve(target):
                 "  Check the id, or pass the output file explicitly:\n"
                 "  slurmwatch path/to/%s" % (job_id, fallback, fallback)
             )
-            return None, 1
+            return None, 1, state
         path = fallback
 
     log("job %s writes to %s" % (job_id, path))
-    return [path], 0
+    return [path], 0, state
 
 
 def poll_job(job_id):
@@ -356,7 +369,7 @@ def main(argv=None):
                         help="Slurm job id, or a path/glob to the file")
     args = parser.parse_args(argv)
 
-    candidates, rc = resolve(args.target)
+    candidates, rc, initial_state = resolve(args.target)
     if candidates is None:
         return rc
     job_id = args.target if is_job_id(args.target) else None
@@ -373,7 +386,10 @@ def main(argv=None):
     quiet_since = time.monotonic()  # when the file last grew
     job_wait = JOB_POLL             # how long quiet before asking Slurm
     next_heartbeat = time.monotonic() + HEARTBEAT
-    last_state = ""
+    last_state = initial_state if is_active(initial_state) else ""
+    finished = bool(initial_state) and not is_active(initial_state)
+    if finished:
+        log("job %s finished: %s" % (job_id, initial_state))
 
     def check_job(following):
         """Ask Slurm once and act on the answer. None means "carry on"."""
@@ -401,8 +417,10 @@ def main(argv=None):
 
     while True:
         if path is None:
-            path = locate(candidates)
+            path = locate(candidates, allow_glob=job_id is None)
             if path is None:
+                if finished:
+                    break
                 if job_id and time.monotonic() - quiet_since >= job_wait:
                     quiet_since = time.monotonic()
                     job_wait = min(job_wait * BACKOFF, JOB_POLL_MAX)
@@ -424,6 +442,9 @@ def main(argv=None):
 
         before = pos
         pos = pump(path, pos)
+
+        if finished:
+            break
 
         if pos != before:
             # Output is arriving, so the job is alive: no need to ask Slurm,
@@ -450,7 +471,7 @@ def main(argv=None):
     while time.monotonic() - last_growth < DRAIN:
         time.sleep(POLL)
         if path is None:
-            path = locate(candidates)
+            path = locate(candidates, allow_glob=job_id is None)
             if path is None:
                 continue
             log("following %s" % path)

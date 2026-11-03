@@ -11,6 +11,8 @@ class CompletionTests(ScriptTestCase):
         self.clock = Clock()
         self.path = os.path.join(self.directory, "job.out")
         self.completed_at = 8
+        self.initial_state = "RUNNING"
+        self.stdout_path = self.path
         self.unavailable_until = 0
         self.calls = []
         self.enter_patch(patch("time.monotonic", self.clock.monotonic))
@@ -23,7 +25,7 @@ class CompletionTests(ScriptTestCase):
         name = cmd[0]
         self.calls.append((self.clock.now, name))
         if name == "scontrol":
-            out = "JobId=123 JobState=RUNNING StdOut=%s\n" % self.path
+            out = "JobId=123 JobState=%s StdOut=%s\n" % (self.initial_state, self.stdout_path)
         elif name == "squeue":
             if self.clock.now < self.unavailable_until:
                 return subprocess.CompletedProcess(cmd, 1, "", "Unable to contact slurm controller")
@@ -82,3 +84,36 @@ class CompletionTests(ScriptTestCase):
         self.assertEqual(self.script["main"](["123"]), 0)
         self.assertEqual(self.output.getvalue(), b"final flush\n")
         self.assertGreaterEqual(self.clock.now, 18 + self.script["DRAIN"])
+
+    def test_initial_completion_drains_without_more_slurm_queries(self):
+        self.initial_state = "COMPLETED"
+        self.unavailable_until = 180
+        self.write("job.out", b"already done\n")
+        self.assertEqual(self.script["main"](["123"]), 0)
+        self.assertEqual(self.output.getvalue(), b"already done\n")
+        self.assertEqual(self.clock.now, self.script["DRAIN"])
+        self.assertEqual(self.calls, [(0, "scontrol")])
+
+    def test_initial_completion_still_waits_for_missing_file(self):
+        self.initial_state = "COMPLETED"
+        self.clock.at(5, lambda: self.write("job.out", b"late\n"))
+        self.assertEqual(self.script["main"](["123"]), 0)
+        self.assertEqual(self.output.getvalue(), b"late\n")
+        self.assertEqual(self.clock.now, 5 + self.script["DRAIN"])
+        self.assertEqual(self.calls, [(0, "scontrol")])
+
+    def test_no_stdout_exits_without_waiting(self):
+        for value in ("NONE", "", os.devnull):
+            with self.subTest(stdout=value):
+                self.stdout_path = value
+                self.assertEqual(self.script["main"](["123"]), 1)
+                self.assertEqual(self.clock.now, 0)
+        self.assertIn("writes no output file", self.errors.getvalue())
+
+    def test_slurm_filename_with_brackets_is_not_globbed(self):
+        self.initial_state = "COMPLETED"
+        self.stdout_path = os.path.join(self.directory, "run[1].out")
+        self.write("run1.out", b"unrelated\n")
+        self.clock.at(5, lambda: self.write("run[1].out", b"correct\n"))
+        self.assertEqual(self.script["main"](["123"]), 0)
+        self.assertEqual(self.output.getvalue(), b"correct\n")

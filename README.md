@@ -29,6 +29,10 @@ works without guessing.
 
 Slurm's default array output name is `slurm-<array_id>_<array_task>.out`
 (`slurm-%A_%a.out`). `%j` is the individual job's numeric ID.
+Numeric padding is supported, for example `%4a` produces `0007` for task 7.
+Paths reported by Slurm are treated literally, including brackets or other
+glob characters. Explicit path arguments prefer an exact existing file before
+trying glob expansion.
 
 The id must be known to Slurm (queue or accounting log). If it is not, and no
 `./slurm-<id>.out` exists either, you get an error rather than a wait for a file
@@ -52,6 +56,9 @@ A four-hour job that prints steadily costs a single Slurm call in total.
 ## Behaviour
 
 - Prints from byte 0, including output written before you started watching.
+- Uses completion reported at startup immediately, without querying Slurm again.
+- Reports jobs with no configured output file (`NONE`, empty, or `/dev/null`)
+  immediately.
 - Detects a truncated or recreated file and rereads it from the top.
 - After the job ends it keeps reading until output has been quiet for 10 s, to
   catch the final flush. If the file has not appeared yet, it waits up to 10 s

@@ -44,3 +44,15 @@ class FileReadingTests(ScriptTestCase):
         self.assertIsNone(self.script["locate"]([pattern]))
         path = self.write("job.out", b"hello")
         self.assertEqual(self.script["locate"]([pattern]), path)
+
+    def test_literal_filename_takes_priority_over_glob_match(self):
+        path = self.write("run[1].out", b"correct")
+        self.write("run1.out", b"wrong")
+        self.assertEqual(self.script["locate"]([path]), path)
+
+    def test_literal_slurm_path_does_not_match_another_file(self):
+        path = os.path.join(self.directory, "run[1].out")
+        self.write("run1.out", b"wrong")
+        self.assertIsNone(self.script["locate"]([path], allow_glob=False))
+        self.write("run[1].out", b"correct")
+        self.assertEqual(self.script["locate"]([path], allow_glob=False), path)
