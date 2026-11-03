@@ -59,6 +59,14 @@ class JobStateTests(unittest.TestCase):
         self.assertEqual(state, "RUNNING")
         self.assertEqual(run.call_count, 1)
 
+    def test_empty_queue_with_unavailable_accounting_is_gone(self):
+        state, run = self.query([
+            subprocess.CompletedProcess([], 0, "", ""),
+            subprocess.CompletedProcess([], 1, "", "Accounting storage is disabled"),
+        ])
+        self.assertEqual(state, "")
+        self.assertEqual(run.call_count, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

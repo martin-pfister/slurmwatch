@@ -1,3 +1,4 @@
+import errno
 import os
 import subprocess
 from unittest.mock import patch
@@ -12,6 +13,7 @@ class CompletionTests(ScriptTestCase):
         self.path = os.path.join(self.directory, "job.out")
         self.completed_at = 8
         self.initial_state = "RUNNING"
+        self.accounting_state = "COMPLETED"
         self.stdout_path = self.path
         self.unavailable_until = 0
         self.calls = []
@@ -33,7 +35,7 @@ class CompletionTests(ScriptTestCase):
                 return subprocess.CompletedProcess(cmd, 1, "", "Invalid job id specified")
             out = "RUNNING\n"
         elif name == "sacct":
-            out = "COMPLETED|\n"
+            out = self.accounting_state + "|\n" if self.accounting_state else ""
         else:
             raise AssertionError("unexpected command: %r" % cmd)
         return subprocess.CompletedProcess(cmd, 0, out, "")
@@ -117,3 +119,69 @@ class CompletionTests(ScriptTestCase):
         self.clock.at(5, lambda: self.write("run[1].out", b"correct\n"))
         self.assertEqual(self.script["main"](["123"]), 0)
         self.assertEqual(self.output.getvalue(), b"correct\n")
+
+    def test_ctrl_c_during_startup_is_quiet(self):
+        with patch("subprocess.run", side_effect=KeyboardInterrupt):
+            self.assertEqual(self.script["main"](["123"]), 130)
+        self.assertEqual(self.errors.getvalue(), "")
+
+    def test_ctrl_c_while_following_is_quiet(self):
+        self.write("job.out", b"hello\n")
+        with patch("time.sleep", side_effect=KeyboardInterrupt):
+            self.assertEqual(self.script["main"](["123"]), 130)
+        self.assertEqual(self.output.getvalue(), b"hello\n")
+        self.assertNotIn("Traceback", self.errors.getvalue())
+
+    def test_unreadable_file_is_reported_instead_of_success(self):
+        self.initial_state = "COMPLETED"
+        self.write("job.out", b"cannot read this\n")
+        error = PermissionError(errno.EACCES, "Permission denied", self.path)
+        with patch("builtins.open", side_effect=error):
+            self.assertEqual(self.script["main"](["123"]), 2)
+        self.assertEqual(self.output.getvalue(), b"")
+        self.assertIn("Permission denied", self.errors.getvalue())
+        self.assertIn(self.path, self.errors.getvalue())
+        self.assertEqual(self.clock.now, 0)
+
+    def test_read_failure_during_drain_is_not_success(self):
+        self.initial_state = "COMPLETED"
+        self.write("job.out", b"first\n")
+        real_open = open
+
+        def open_until_failure(*args, **kwargs):
+            if self.clock.now >= 2:
+                raise OSError(errno.EIO, "Input/output error", self.path)
+            return real_open(*args, **kwargs)
+
+        with patch("builtins.open", side_effect=open_until_failure):
+            self.assertEqual(self.script["main"](["123"]), 2)
+        self.assertEqual(self.output.getvalue(), b"first\n")
+        self.assertIn("Input/output error", self.errors.getvalue())
+
+    def test_gone_job_with_output_is_drained(self):
+        self.write("job.out", b"last lines\n")
+        self.accounting_state = ""
+        self.assertEqual(self.script["main"](["123"]), 0)
+        self.assertEqual(self.output.getvalue(), b"last lines\n")
+        self.assertGreaterEqual(self.clock.now, self.completed_at + self.script["DRAIN"])
+
+    def test_gone_job_without_output_fails_after_grace_period(self):
+        self.accounting_state = ""
+        self.assertEqual(self.script["main"](["123"]), 1)
+        self.assertIn("without writing", self.errors.getvalue())
+        self.assertGreaterEqual(self.clock.now, self.completed_at + self.script["DRAIN"])
+
+    def test_scheduler_backoff_resets_after_output_resumes(self):
+        self.completed_at = 110
+        self.write("job.out", b"initial\n")
+        self.clock.at(80, lambda: self.write("job.out", b"resumed\n", "ab"))
+        self.assertEqual(self.script["main"](["123"]), 0)
+        queries = [t for t, name in self.calls if name == "squeue"]
+        early = [t for t in queries if t < 80]
+        gaps = [b - a for a, b in zip(early, early[1:])]
+        self.assertGreater(len(gaps), 2)
+        self.assertGreater(gaps[-1], gaps[0])
+        # File polling can delay noticing the new bytes by MAX_POLL seconds;
+        # after that, the reset must query promptly instead of waiting a minute.
+        next_query = next(t for t in queries if t > 80)
+        self.assertLess(next_query, 80 + self.script["MAX_POLL"] + 5)

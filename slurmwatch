@@ -62,7 +62,7 @@ CMD_TIMEOUT = 10.0
 # What a single Slurm query tells us.
 ACTIVE = "active"    # alive, output can still grow
 DONE = "done"        # reached a final state, we know which
-GONE = "gone"        # no record anywhere: cancelled, removed, or pruned
+GONE = "gone"        # not queued; accounting has no state or is unavailable
 UNKNOWN = "unknown"  # Slurm could not be asked at all
 
 
@@ -115,9 +115,9 @@ def is_job_id(target):
 def job_state(job_id):
     """Slurm's word on the job.
 
-    A state string while it is known, "" once it is gone, None if Slurm cannot
-    be asked at all (tools missing, transient error) - so a broken query is
-    never mistaken for a finished job.
+    A state string while it is known, "" if not queued and accounting has no
+    usable state, None if the queue query failed (tools missing, transient
+    error). A broken queue query is never mistaken for a finished job.
     """
     try:
         # -h drops the header; an empty answer means "not in the queue".
@@ -257,8 +257,8 @@ def pump(path, pos):
                 sys.stdout.buffer.write(chunk)
                 pos += len(chunk)
         sys.stdout.buffer.flush()
-    except OSError:
-        pass  # not there (yet) or unreadable; the next tick retries
+    except FileNotFoundError:
+        pass  # not there (yet); other I/O failures must be reported
     return pos
 
 
@@ -354,7 +354,7 @@ def poll_job(job_id):
     return GONE, ""
 
 
-def main(argv=None):
+def _main(argv=None):
     parser = argparse.ArgumentParser(
         prog="slurmwatch",
         description="Wait for a Slurm job's output file to appear, then follow "
@@ -369,21 +369,19 @@ def main(argv=None):
                         help="Slurm job id, or a path/glob to the file")
     args = parser.parse_args(argv)
 
+    # `slurmwatch 1 | head` should not traceback.
+    if hasattr(signal, "SIGPIPE"):
+        signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+
     candidates, rc, initial_state = resolve(args.target)
     if candidates is None:
         return rc
     job_id = args.target if is_job_id(args.target) else None
 
-    # Ctrl-C should end us quietly, and `slurmwatch 1 | head` should not
-    # traceback.
-    signal.signal(signal.SIGINT, lambda *_: sys.exit(130))
-    if hasattr(signal, "SIGPIPE"):
-        signal.signal(signal.SIGPIPE, signal.SIG_DFL)
-
     path = None
     pos = 0
     interval = POLL
-    quiet_since = time.monotonic()  # when the file last grew
+    query_since = time.monotonic()  # last output growth or scheduler check
     job_wait = JOB_POLL             # how long quiet before asking Slurm
     next_heartbeat = time.monotonic() + HEARTBEAT
     last_state = initial_state if is_active(initial_state) else ""
@@ -391,29 +389,29 @@ def main(argv=None):
     if finished:
         log("job %s finished: %s" % (job_id, initial_state))
 
-    def check_job(following):
-        """Ask Slurm once and act on the answer. None means "carry on"."""
+    def job_finished(following):
+        """Ask Slurm once; return whether to begin the final drain."""
         nonlocal last_state
         verdict, state = poll_job(job_id)
         if verdict == UNKNOWN:
-            return None  # cannot ask; keep going
+            return False  # cannot ask; keep going
         if verdict == ACTIVE:
             last_state = state
-            return None
+            return False
         if verdict == DONE:
             log("job %s finished: %s" % (job_id, state))
-            return 0 if following else 1
-        # GONE: no record anywhere.
+            return True
+        # GONE: no queue record and no usable accounting state.
         if last_state:
             log("job %s is gone from the queue" % job_id)
-            return 0 if following else 1
+            return True
         if following:
             # Nothing knows this id, but the file is there and has been read:
             # most likely a job old enough to have been pruned from accounting.
             log("job %s is not known to Slurm; showing what is there" % job_id)
-            return 0
+            return True
         log("job %s is no longer known to Slurm" % job_id)
-        return 1
+        return True
 
     while True:
         if path is None:
@@ -421,11 +419,10 @@ def main(argv=None):
             if path is None:
                 if finished:
                     break
-                if job_id and time.monotonic() - quiet_since >= job_wait:
-                    quiet_since = time.monotonic()
+                if job_id and time.monotonic() - query_since >= job_wait:
+                    query_since = time.monotonic()
                     job_wait = min(job_wait * BACKOFF, JOB_POLL_MAX)
-                    rc = check_job(following=False)
-                    if rc is not None:
+                    if job_finished(following=False):
                         break
                 if time.monotonic() >= next_heartbeat:
                     next_heartbeat = time.monotonic() + HEARTBEAT
@@ -436,7 +433,7 @@ def main(argv=None):
 
             pos = 0
             interval = POLL
-            quiet_since = time.monotonic()
+            query_since = time.monotonic()
             job_wait = JOB_POLL
             log("following %s" % path)
 
@@ -449,18 +446,17 @@ def main(argv=None):
         if pos != before:
             # Output is arriving, so the job is alive: no need to ask Slurm,
             # and the next quiet spell is checked promptly again.
-            quiet_since = time.monotonic()
+            query_since = time.monotonic()
             job_wait = JOB_POLL
             interval = POLL
         else:
             interval = min(interval * BACKOFF, MAX_POLL)
-            if job_id and time.monotonic() - quiet_since >= job_wait:
-                quiet_since = time.monotonic()
+            if job_id and time.monotonic() - query_since >= job_wait:
+                query_since = time.monotonic()
                 # Back off the Slurm queries too: a job that has been silent
                 # for minutes does not need checking every few seconds.
                 job_wait = min(job_wait * BACKOFF, JOB_POLL_MAX)
-                rc = check_job(following=True)
-                if rc is not None:
+                if job_finished(following=True):
                     break
 
         time.sleep(interval)
@@ -484,6 +480,17 @@ def main(argv=None):
         log("job %s ended without writing %s" % (job_id, candidates[0]))
         return 1
     return 0
+
+
+def main(argv=None):
+    """Keep interruption and I/O failures quiet throughout the CLI lifecycle."""
+    try:
+        return _main(argv)
+    except KeyboardInterrupt:
+        return 130
+    except OSError as exc:
+        log("I/O error: %s" % exc)
+        return 2
 
 
 if __name__ == "__main__":

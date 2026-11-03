@@ -92,12 +92,13 @@ outcomes, not two:
 | outcome | meaning |
 |---|---|
 | a state string (`RUNNING`, `COMPLETED`, …) | Slurm knows the job |
-| `""` | Slurm answered, and has no record of it |
-| `None` / unavailable | Slurm could not be asked at all |
+| `""` | not queued, and accounting has no state or is unavailable |
+| `None` / unavailable | the queue query failed without establishing absence |
 
-Collapsing the last two is a bug: a failed query (missing binary, scheduler
-timeout, database down) would be read as "job finished", and the watcher would
-exit while the job is still running. Every call site must distinguish them.
+A failed queue query (missing binary, scheduler timeout) must not be read as
+"job finished". An explicit invalid-job response does establish absence and
+falls through to accounting. Once the queue has established absence, unavailable
+accounting is treated as `GONE`; accounting is not required to stop following.
 
 Above that sits a four-way verdict used by the main loop:
 
@@ -105,14 +106,18 @@ Above that sits a four-way verdict used by the main loop:
 |---|---|
 | `ACTIVE` | keep following |
 | `DONE` (a final state) | report the state, stop |
-| `GONE` (no record anywhere) | decide from context — see below |
+| `GONE` (not queued, no accounting state) | drain output, then stop |
 | `UNKNOWN` | carry on, say nothing |
 
 `GONE` needs context because it is ambiguous:
 
-- **saw it running** → it finished and was pruned from accounting → stop, exit 0;
-- **following a file that exists** → same conclusion, show what is there → exit 0;
-- **never saw it running, no file** → cancelled while still queued → exit 1.
+- **saw it active** → report that it left the queue;
+- **following a file, never saw it active** → report that the job is no longer
+  known and show the available output;
+- **no file yet** → allow the post-completion grace period before concluding
+  that it ended without writing output.
+
+After draining, exit 0 if a file was found and read, or 1 if none appeared.
 
 That last case is the one that hangs a naive implementation: the job never
 starts, so no file ever appears, and nothing else signals the end.
@@ -130,9 +135,9 @@ nothing Slurm can add. So:
 - when the file goes quiet, query on a backoff (3 s → 60 s);
 - reset the backoff the moment output resumes.
 
-A steadily-printing job therefore costs **one** call for its entire life — the
-`scontrol` at startup. `sacct` is used only after the job leaves the queue, to
-report the final state.
+A steadily-printing job therefore needs only the `scontrol` call at startup
+while output continues. Once output stops, further queries detect completion.
+`sacct` is used after the job leaves the queue to report the final state.
 
 Two independent backoffs, with deliberately different ceilings:
 
@@ -186,12 +191,13 @@ be complete enters the drain immediately without another scheduler query.
 - Job output → **stdout**, binary-exact, nothing added.
 - All status messages → **stderr**, flushed immediately.
 
-This split is what makes `slurmwatch 123 > combined.log` produce a usable log.
-Any reimplementation that interleaves status text into stdout has broken the
-primary use case.
+This split keeps job output distinct from watcher status. The primary use is
+interactive viewing; redirecting stdout also produces a clean log.
 
 Exit codes: `0` finished, `1` job ended/cancelled without writing or unknown id,
-`2` bad argument or Slurm unusable, `130` interrupted.
+`2` bad argument, Slurm unusable at startup, or I/O error; `130` interrupted.
+Missing files are retried; other I/O failures are reported rather than silently
+treated as a quiet file. Ctrl-C is caught across startup, following, and draining.
 
 Ctrl-C must exit quietly with 130, not a traceback. `SIGPIPE` must be restored
 to default so `slurmwatch 123 | head` dies silently.
@@ -204,8 +210,8 @@ current script avoids these, though f-strings would in fact be fine on 3.6:
 - `subprocess.run(text=...)` — **3.7+**; use `universal_newlines=True`. This one
   parses fine on 3.6 and fails at runtime, so a syntax check will not catch it.
 - the walrus operator (3.8)
-- `X | Y` annotations and builtin generics like `dict[str, str]` (3.7/3.9)
-- `raise ... from ...` chains (3.0+, but avoid if targeting older)
+- `X | Y` union types (3.10)
+- builtin generics like `dict[str, str]` (3.9)
 
 Verify a 3.6 target by parsing with `ast.parse(src, feature_version=(3, 6))`
 **and** separately auditing runtime-only features such as `text=`.
@@ -222,10 +228,9 @@ Verify a 3.6 target by parsing with `ast.parse(src, feature_version=(3, 6))`
 
 ## Alternatives considered and rejected
 
-**`tail -f` / `tail --follow=name --retry`.** Cannot wait for a file that does
-not exist in a way that also reads from the start, and `--retry` combined with
-`-c +0` either races the job or re-reads from the beginning every time the file
-is replaced.
+**GNU `tail -c +1 --follow=name --retry`.** Can wait for a missing file and read
+it from the start. It does not resolve Slurm job IDs to output paths or stop
+automatically when Slurm reports completion.
 
 **inotify.** Does not propagate across NFS/Lustre from compute nodes.
 
@@ -238,9 +243,9 @@ the output file, and adds another scheduler call.
 **Fixed poll and query intervals.** Simple, but either too hot for long jobs or
 too slow for interactive ones. Backoff gets both.
 
-**Exiting 0 on a failed job.** Rejected on request: the author never chains
-`slurmwatch … && …`. If a reimplementation does chain, exit non-zero for
-`FAILED`/`TIMEOUT`/`OUT_OF_MEMORY` instead.
+**Propagating the Slurm job's failure as the watcher exit code.** Not needed for
+interactive viewing. Exit 0 means the watcher showed the available output,
+including for `FAILED`/`TIMEOUT`/`OUT_OF_MEMORY` jobs; it is not a job-success check.
 
 ## Things that are load-bearing; do not simplify away
 

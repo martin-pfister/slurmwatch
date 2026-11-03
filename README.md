@@ -3,10 +3,9 @@
 Wait for a Slurm job's output file to appear, then follow it from the very
 first byte, and stop by itself when the job finishes.
 
-`tail -f` can't do this: it needs the file to exist already, so you end up
-polling for `slurm.out.started` or re-running `tail` until the job begins.
-`slurmwatch` waits for you, prints everything from the top of the file, and
-exits when Slurm reports the job is done.
+GNU `tail -c +1 --follow=name --retry` can wait for a file and read it from
+the start. `slurmwatch` also finds the output path from the job ID and exits
+when Slurm reports the job is done.
 
 ## Usage
 
@@ -51,7 +50,8 @@ Slurm is asked as little as possible:
   from 3 s to 60 s. `sacct` is consulted only once the job leaves the queue,
   to report its final state.
 
-A four-hour job that prints steadily costs a single Slurm call in total.
+A job that prints steadily needs only the startup call while output continues;
+further queries detect completion once output stops.
 
 ## Behaviour
 
@@ -59,7 +59,9 @@ A four-hour job that prints steadily costs a single Slurm call in total.
 - Uses completion reported at startup immediately, without querying Slurm again.
 - Reports jobs with no configured output file (`NONE`, empty, or `/dev/null`)
   immediately.
-- Detects a truncated or recreated file and rereads it from the top.
+- Rereads from the top when the file becomes smaller than the current offset.
+  Replacements that are already as large as that offset are not detected.
+- Retries a temporarily missing file; other I/O errors are reported and exit 2.
 - After the job ends it keeps reading until output has been quiet for 10 s, to
   catch the final flush. If the file has not appeared yet, it waits up to 10 s
   for it, then gives any newly discovered file a full drain period.
@@ -71,8 +73,11 @@ A four-hour job that prints steadily costs a single Slurm call in total.
 |---|---|
 | 0 | job finished and its output was shown |
 | 1 | job ended or was cancelled without writing the file, or the id is unknown |
-| 2 | bad argument: missing directory, a directory instead of a file, or Slurm unusable |
+| 2 | bad argument, Slurm unusable at startup, or I/O error |
 | 130 | interrupted |
+
+Exit 0 means the watcher finished showing the output, not that the Slurm job
+succeeded. A failed job can still produce useful output.
 
 ## Requirements
 
