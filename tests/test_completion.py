@@ -1,6 +1,5 @@
 import os
 import subprocess
-import unittest
 from unittest.mock import patch
 
 from helpers import Clock, ScriptTestCase
@@ -66,11 +65,20 @@ class CompletionTests(ScriptTestCase):
         self.assertEqual(self.script["main"](["123"]), 1)
         self.assertEqual(self.output.getvalue(), b"")
         self.assertIn("without writing", self.errors.getvalue())
+        completion_seen = next(t for t, name in self.calls if name == "sacct")
+        self.assertGreaterEqual(self.clock.now, completion_seen + self.script["DRAIN"])
 
-    @unittest.expectedFailure
     def test_file_appearing_just_after_completion_is_drained(self):
-        # Known bug: the waiting-for-file branch skips the drain period.
         self.completed_at = 0
         self.clock.at(5, lambda: self.write("job.out", b"delayed visibility\n"))
         self.assertEqual(self.script["main"](["123"]), 0)
         self.assertEqual(self.output.getvalue(), b"delayed visibility\n")
+        self.assertGreaterEqual(self.clock.now, 5 + self.script["DRAIN"])
+
+    def test_late_empty_file_gets_full_drain_period(self):
+        self.completed_at = 0
+        self.clock.at(12, lambda: self.write("job.out", b""))
+        self.clock.at(18, lambda: self.write("job.out", b"final flush\n", "ab"))
+        self.assertEqual(self.script["main"](["123"]), 0)
+        self.assertEqual(self.output.getvalue(), b"final flush\n")
+        self.assertGreaterEqual(self.clock.now, 18 + self.script["DRAIN"])

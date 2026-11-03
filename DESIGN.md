@@ -44,17 +44,19 @@ file that will never be created.
 `UserId` and `JobState` in one call. From those the real path can be computed
 *before the job runs*.
 
-Escapes that can be resolved up front: `%j` (full id, **including** the array
-task suffix), `%x` (job name), `%u` (user), `%a`/`%t` (array task), `%A` (array
-job id).
+Escapes that can be resolved up front: `%j` (individual numeric job id), `%x`
+(job name), `%u` (user), `%a` (array task), `%A` (array job id). Array metadata
+comes from the separate `ArrayJobId` and `ArrayTaskId` fields, not from splitting
+`JobId`. Slurm's default array filename is `slurm-%A_%a.out`.
 
-Escapes that cannot: `%N` (node), `%s` (step), `%J` (id *and* step). If the
+Escapes that cannot: `%N` (node), `%s` (step), `%J` (id *and* step), `%t` (task
+rank, not array index). If the
 pattern needs any of these, do not guess — fall back. A plausible-but-wrong
 path is worse than an honest fallback.
 
-Subtlety: `%a` and `%t` are only knowable if the user named a task
-(`500_7`). On a bare array id they are ambiguous, so refuse rather than assume
-task 0.
+Subtlety: `%a` is ambiguous when `ArrayTaskId` describes multiple tasks rather
+than a single numeric index. Refuse rather than assume task 0. For non-array
+jobs, Slurm expands `%A` to the job id and `%a` to `4294967294` (`NO_VAL`).
 
 Also: `scontrol` values may contain spaces (`StdOut=/scratch/my dir/out.log`),
 so the `Key=Value` output must be split only where a new `Key=` begins, not on
@@ -170,6 +172,10 @@ adapts; a fixed deadline either cuts a slow flush or wastes time on a fast one.
 
 Filesystems lie about completion in the other direction too: on NFS with
 attribute caching, `st_size` can lag by seconds. The quiet timer absorbs this.
+
+If the file has not appeared when completion is detected, allow 10 seconds for
+it to become visible before reporting that the job wrote no file. A file found
+during this grace period gets a fresh quiet timer, even if it is initially empty.
 
 ## Output and exit codes
 

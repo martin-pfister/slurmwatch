@@ -173,23 +173,25 @@ def expand_escapes(pattern, fields):
     """Expand the %-escapes Slurm allows in --output.
 
     None if the pattern needs something we cannot know before the job runs:
-    node name (%N), step (%s), or an array index when no task was named
-    (%a/%t on a job id without _<task>). Better to fall back than to wait for
+    node name (%N), step (%s), task rank (%t), or an ambiguous array index
+    (%a on an array record representing multiple tasks). Better to fall back than to wait for
     a file that will never be created.
     """
     job_id = fields.get("JobId", "")
-    array_job, _, array_task = job_id.partition("_")
+    array_job = fields.get("ArrayJobId", "")
+    array_task = fields.get("ArrayTaskId", "")
     table = {
         "%": "%",
-        # %j is the full id including the array task, e.g. 500_7.
+        # %j is the individual job's numeric ID, including for array tasks.
         "j": job_id,
+        "A": array_job or job_id,
         "x": fields.get("JobName", ""),
         "u": fields.get("UserId", "").split("(")[0],
     }
-    if array_task:
-        # %a/%t are the task index; %A is the array's own id.
-        table["a"] = table["t"] = array_task
-        table["A"] = fields.get("ArrayJobId") or array_job
+    if array_task.isdigit():
+        table["a"] = array_task
+    elif not array_job:
+        table["a"] = "4294967294"  # Slurm's NO_VAL for non-array jobs
     try:
         return re.sub(r"%(.)", lambda m: table[m.group(1)], pattern)
     except KeyError:
@@ -383,11 +385,7 @@ def main(argv=None):
             last_state = state
             return None
         if verdict == DONE:
-            if not following:
-                log("job %s %s without writing %s"
-                    % (job_id, state, candidates[0]))
-            else:
-                log("job %s finished: %s" % (job_id, state))
+            log("job %s finished: %s" % (job_id, state))
             return 0 if following else 1
         # GONE: no record anywhere.
         if last_state:
@@ -398,8 +396,7 @@ def main(argv=None):
             # most likely a job old enough to have been pruned from accounting.
             log("job %s is not known to Slurm; showing what is there" % job_id)
             return 0
-        # Never seen running, and no file: cancelled while still queued.
-        log("job %s disappeared from the queue before it started" % job_id)
+        log("job %s is no longer known to Slurm" % job_id)
         return 1
 
     while True:
@@ -411,7 +408,7 @@ def main(argv=None):
                     job_wait = min(job_wait * BACKOFF, JOB_POLL_MAX)
                     rc = check_job(following=False)
                     if rc is not None:
-                        return rc
+                        break
                 if time.monotonic() >= next_heartbeat:
                     next_heartbeat = time.monotonic() + HEARTBEAT
                     log("still waiting for %s" % candidates[0])
@@ -452,10 +449,19 @@ def main(argv=None):
     last_growth = time.monotonic()
     while time.monotonic() - last_growth < DRAIN:
         time.sleep(POLL)
+        if path is None:
+            path = locate(candidates)
+            if path is None:
+                continue
+            log("following %s" % path)
+            last_growth = time.monotonic()
         before = pos
         pos = pump(path, pos)
         if pos != before:
             last_growth = time.monotonic()
+    if path is None:
+        log("job %s ended without writing %s" % (job_id, candidates[0]))
+        return 1
     return 0
 
 

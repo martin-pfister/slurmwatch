@@ -23,9 +23,12 @@ Job output goes to stdout, status messages to stderr, so you get a clean log:
 ## How it finds the file
 
 For a job id it runs `scontrol show job` once and reads `StdOut`, expanding
-the Slurm escapes it can know in advance (`%j`, `%x`, `%u`, `%a`, `%t`, `%A`),
+the Slurm escapes it can know in advance (`%j`, `%x`, `%u`, `%a`, `%A`),
 and resolving relative names against `WorkDir`. So `#SBATCH -o logs/%x-%j.log`
 works without guessing.
+
+Slurm's default array output name is `slurm-<array_id>_<array_task>.out`
+(`slurm-%A_%a.out`). `%j` is the individual job's numeric ID.
 
 The id must be known to Slurm (queue or accounting log). If it is not, and no
 `./slurm-<id>.out` exists either, you get an error rather than a wait for a file
@@ -51,7 +54,8 @@ A four-hour job that prints steadily costs a single Slurm call in total.
 - Prints from byte 0, including output written before you started watching.
 - Detects a truncated or recreated file and rereads it from the top.
 - After the job ends it keeps reading until output has been quiet for 10 s, to
-  catch the final flush.
+  catch the final flush. If the file has not appeared yet, it waits up to 10 s
+  for it, then gives any newly discovered file a full drain period.
 - Ctrl-C exits 130 quietly; `slurmwatch 123 | head` exits without a traceback.
 
 ## Exit codes
@@ -86,10 +90,6 @@ The tests mock Slurm commands, use automatically cleaned-up temporary files,
 and simulate time rather than sleeping. They cover job-state queries,
 output-path resolution, binary reading and truncation, file discovery, and
 completion/drain timing.
-
-Two tests are marked as expected failures to track known bugs: array paths
-using Slurm's separate array fields, and files becoming visible just after
-completion. Once fixed, remove those markers so the tests become regressions.
 
 ## Licence
 
