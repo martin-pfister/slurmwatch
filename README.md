@@ -67,3 +67,9 @@ A four-hour job that prints steadily costs a single Slurm call in total.
 
 Python 3.6 or newer, no third-party modules. `scontrol`, `squeue` and `sacct`
 must be on `PATH`; without them only explicit paths work.
+
+## Design notes
+
+[DESIGN.md](DESIGN.md) records why it works the way it does — the trade-offs
+behind resolving the path from Slurm, the three-valued job state, the polling
+backoff, and the known limitations — as a basis for reimplementation.
