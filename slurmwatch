@@ -74,21 +74,30 @@ class Unavailable(Exception):
     """A Slurm command is missing or failed."""
 
 
+class JobNotFound(Unavailable):
+    """squeue answered, but the job is no longer in its records."""
+
+
 def _run(cmd):
     if shutil.which(cmd[0]) is None:
         raise Unavailable("%s not found" % cmd[0])
     try:
         # universal_newlines, not text= : the latter is Python 3.7+.
+        env = os.environ.copy()
+        env["LC_ALL"] = "C"  # keep Slurm's error messages recognizable
         proc = subprocess.run(
             cmd,
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            env=env,
             timeout=CMD_TIMEOUT,
             universal_newlines=True,
         )
     except (subprocess.SubprocessError, OSError) as exc:
         raise Unavailable(str(exc))
     if proc.returncode != 0:
+        if cmd[0] == "squeue" and "Invalid job id specified" in proc.stderr:
+            raise JobNotFound("job is no longer known to squeue")
         raise Unavailable("%s exited %d" % (cmd[0], proc.returncode))
     return proc.stdout
 
@@ -115,6 +124,8 @@ def job_state(job_id):
         out = _run(["squeue", "-h", "-j", job_id, "-o", "%T"]).strip()
         if out:
             return out.splitlines()[0].strip()
+    except JobNotFound:
+        pass  # a pruned job can still have a final state in accounting
     except Unavailable:
         return None
 
