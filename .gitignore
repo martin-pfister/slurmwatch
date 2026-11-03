@@ -1,0 +1,8 @@
+# editor leftovers
+.*.swp
+*.swp
+*~
+
+# Python
+__pycache__/
+*.py[cod]
