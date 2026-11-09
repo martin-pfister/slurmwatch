@@ -2,6 +2,7 @@
 """slurmwatch - wait for a Slurm job's output file, then follow it from the top.
 
 Usage:
+    slurmwatch                        # use the only job in your queue
     slurmwatch 1234567                # job id: ask Slurm where its output goes
     slurmwatch slurm-1234567.out      # explicit path, relative or absolute
     slurmwatch ~/runs/run-42.log      # explicit path
@@ -110,6 +111,30 @@ def is_job_id(target):
     """A Slurm job id: '1234567' or an array task '1234567_3'."""
     job, sep, task = target.partition("_")
     return bool(job) and job.isdigit() and (not sep or task.isdigit())
+
+
+def queued_target():
+    """Select the current user's only queued job, or explain why we cannot."""
+    try:
+        out = _run(["squeue", "--me", "--noheader", "--array", "--format=%i"])
+    except Unavailable as exc:
+        log("cannot query your queue: %s.\n"
+            "  Pass a job ID or output file explicitly: slurmwatch TARGET" % exc)
+        return None
+    jobs = [line.strip() for line in out.splitlines() if line.strip()]
+    if not jobs:
+        log("no jobs found in your queue.\n"
+            "  Pass a job ID or output file explicitly: slurmwatch TARGET")
+        return None
+    if len(jobs) > 1:
+        log("multiple jobs found in your queue: %s\n"
+            "  Choose one with: slurmwatch JOB_ID" % ", ".join(jobs))
+        return None
+    if not is_job_id(jobs[0]):
+        log("squeue returned an unsupported job ID: %s\n"
+            "  Pass the output file explicitly: slurmwatch path/to/output" % jobs[0])
+        return None
+    return jobs[0]
 
 
 def job_state(job_id):
@@ -360,23 +385,31 @@ def _main(argv=None):
         description="Wait for a Slurm job's output file to appear, then follow "
         "it from the first line until the job finishes.",
         epilog="examples:\n"
+        "  slurmwatch  # use the only job in your queue\n"
         "  slurmwatch 1234567\n"
         "  slurmwatch logs/run-42.log\n"
         "  slurmwatch 'slurm-*.out'\n",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("target",
-                        help="Slurm job id, or a path/glob to the file")
+    parser.add_argument("target", nargs="?",
+                        help="Slurm job id, or a path/glob to the file; "
+                        "defaults to the only job in your queue")
     args = parser.parse_args(argv)
 
     # `slurmwatch 1 | head` should not traceback.
     if hasattr(signal, "SIGPIPE"):
         signal.signal(signal.SIGPIPE, signal.SIG_DFL)
 
-    candidates, rc, initial_state = resolve(args.target)
+    target = args.target
+    if target is None:
+        target = queued_target()
+        if target is None:
+            return 2
+
+    candidates, rc, initial_state = resolve(target)
     if candidates is None:
         return rc
-    job_id = args.target if is_job_id(args.target) else None
+    job_id = target if is_job_id(target) else None
 
     path = None
     pos = 0

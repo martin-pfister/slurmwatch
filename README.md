@@ -9,11 +9,18 @@ when Slurm reports the job is done.
 
 ## Usage
 
+    slurmwatch                        # use the only job in your queue
     slurmwatch 1234567                # job id: ask Slurm where its output goes
     slurmwatch slurm-1234567.out      # explicit path, relative or absolute
     slurmwatch ~/runs/run-42.log      # explicit path
     slurmwatch 'slurm-*.out'          # explicit glob
     slurmwatch 500_7                  # one task of an array job
+
+Without an argument, `slurmwatch` asks `squeue` for your own jobs and selects
+the job only if exactly one is queued. No jobs or multiple jobs produce a
+helpful error (exit 2); with multiple jobs, the message lists their IDs so you
+can choose one explicitly. Array tasks count as separate jobs. A failed queue
+query is reported as an error, not mistaken for an empty queue.
 
 Job output goes to stdout, status messages to stderr, so you get a clean log:
 
@@ -43,7 +50,7 @@ exits on its own, since there is no job to watch.
 Slurm is asked as little as possible:
 
 - **One call at startup.** `scontrol` reports the state and the output path
-  together.
+  together. Without an argument, one extra `squeue` call selects the job first.
 - **No calls while output is flowing.** Bytes arriving prove the job is alive,
   so there is nothing to ask.
 - **Backoff when quiet.** Once the file goes quiet the query interval grows

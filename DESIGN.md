@@ -33,6 +33,13 @@ place. A job id means "ask Slurm"; anything else means "just read this file".
 Job ids must be recognised explicitly, not by `str.isdigit()`: array tasks
 (`123_3`) are printed that way by `squeue` and are a normal thing to paste.
 
+With no argument, first run `squeue --me --noheader --array --format=%i`.
+Select only the current user's sole queued job, then use the same job-id path
+as an explicit argument. Expand array tasks into separate rows to avoid
+mistaking a whole array for one job. An empty or ambiguous queue, a failed
+query, or an unsupported ID is a startup error (exit 2), with guidance to pass
+an explicit target. Explicit targets do not incur this extra query.
+
 ## Why the output path comes from Slurm, not from guessing
 
 Default naming is `slurm-%j.out` in the submission directory, but any job may
